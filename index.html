@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ASCII Rain Fill</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    color: #e0e0e0;
+    font-family: 'Courier New', monospace;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+  #input-bar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    width: 100%;
+    padding: 20px;
+    background: #000;
+    border-bottom: 1px solid #222;
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+    align-items: center;
+  }
+  #text-input {
+    font-family: 'Courier New', monospace;
+    font-size: 24px;
+    padding: 10px 18px;
+    background: #111;
+    border: 1px solid #333;
+    color: #fff;
+    border-radius: 6px;
+    width: 500px;
+    max-width: 80vw;
+    outline: none;
+    letter-spacing: 2px;
+  }
+  #text-input:focus { border-color: #666; }
+  #text-input::placeholder { color: #444; }
+  #controls {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+  }
+  #controls label {
+    font-size: 13px;
+    color: #888;
+  }
+  #speed-slider {
+    width: 80px;
+    accent-color: #888;
+  }
+  #canvas-container {
+    padding: 30px 20px 60px;
+    display: flex;
+    justify-content: center;
+  }
+  canvas {
+    display: block;
+  }
+</style>
+</head>
+<body>
+<div id="input-bar">
+  <input type="text" id="text-input" placeholder="Type ASCII text..." autofocus />
+  <div id="controls">
+    <label>Speed</label>
+    <input type="range" id="speed-slider" min="1" max="10" value="5" />
+  </div>
+</div>
+<div id="canvas-container">
+  <canvas id="canvas"></canvas>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  const input = document.getElementById('text-input');
+  const speedSlider = document.getElementById('speed-slider');
+
+  // --- Configuration ---
+  const CELL_SIZE = 10;
+  const SMALL_FONT_SIZE = 9;
+  const CHAR_GAP = 12;
+  const LINE_GAP = 20;
+  const DROP_INTERVAL_BASE = 30;
+  const SIDE_PADDING = 40;
+
+  // Dynamically compute font size based on available width and text length
+  function computeFontSize(text) {
+    // Default large size, but shrink if text is very long
+    // We'll use this as a starting hint; actual wrapping handles the rest
+    return 200;
+  }
+
+  // --- State ---
+  let letters = [];
+  let layoutRows = [];  // array of { letters: [], y, height, width }
+  let totalCanvasWidth = 0;
+  let totalCanvasHeight = 0;
+  let animId = null;
+
+  // --- Mask generation ---
+  function generateMask(char, fontSize) {
+    const offscreen = document.createElement('canvas');
+    const octx = offscreen.getContext('2d');
+
+    octx.font = `bold ${fontSize}px 'Courier New', monospace`;
+    const metrics = octx.measureText(char);
+
+    const width = Math.ceil(metrics.width) + 20;
+    const height = fontSize + 40;
+    offscreen.width = width;
+    offscreen.height = height;
+
+    // Draw filled character
+    octx.font = `bold ${fontSize}px 'Courier New', monospace`;
+    octx.fillStyle = '#fff';
+    octx.textBaseline = 'top';
+    octx.fillText(char, 10, 10);
+
+    // Sample into grid
+    const cols = Math.floor(width / CELL_SIZE);
+    const rows = Math.floor(height / CELL_SIZE);
+    const imageData = octx.getImageData(0, 0, width, height);
+    const pixels = imageData.data;
+
+    const grid = [];
+    for (let r = 0; r < rows; r++) {
+      const row = [];
+      for (let c = 0; c < cols; c++) {
+        const px = Math.floor(c * CELL_SIZE + CELL_SIZE / 2);
+        const py = Math.floor(r * CELL_SIZE + CELL_SIZE / 2);
+        const idx = (py * width + px) * 4;
+        const alpha = pixels[idx + 3];
+        row.push(alpha > 80);
+      }
+      grid.push(row);
+    }
+
+    // Compute border mask: cells that are on the edge of the shape
+    const border = [];
+    for (let r = 0; r < rows; r++) {
+      const brow = [];
+      for (let c = 0; c < cols; c++) {
+        if (!grid[r][c]) {
+          brow.push(false);
+          continue;
+        }
+        // A cell is border if any neighbor (8-connected) is outside or off-grid
+        let isBorder = false;
+        for (let dr = -1; dr <= 1 && !isBorder; dr++) {
+          for (let dc = -1; dc <= 1 && !isBorder; dc++) {
+            if (dr === 0 && dc === 0) continue;
+            const nr = r + dr;
+            const nc = c + dc;
+            if (nr < 0 || nr >= rows || nc < 0 || nc >= cols || !grid[nr][nc]) {
+              isBorder = true;
+            }
+          }
+        }
+        brow.push(isBorder);
+      }
+      border.push(brow);
+    }
+
+    return { grid, border, cols, rows, pixelWidth: cols * CELL_SIZE, pixelHeight: rows * CELL_SIZE };
+  }
+
+  // --- Layout: wrap text into rows, keeping words together ---
+  function computeLayout(text, fontSize) {
+    const availableWidth = window.innerWidth - SIDE_PADDING * 2;
+    const spaceWidth = fontSize * 0.4 + CHAR_GAP;
+
+    // Split into words, generate masks for each character
+    const words = text.split(' ').filter(w => w.length > 0);
+    const measuredWords = words.map(word => {
+      const chars = [];
+      let wordWidth = 0;
+      for (const ch of word) {
+        const mask = generateMask(ch, fontSize);
+        chars.push({ char: ch, mask, spaceWidth: 0 });
+        wordWidth += mask.pixelWidth + CHAR_GAP;
+      }
+      wordWidth -= CHAR_GAP; // no trailing gap within word
+      return { chars, width: wordWidth };
+    });
+
+    // Wrap whole words into rows
+    const rows = [];
+    let currentRow = [];
+    let currentWidth = 0;
+
+    for (const word of measuredWords) {
+      const neededWidth = currentRow.length > 0 ? spaceWidth + word.width : word.width;
+
+      if (currentRow.length > 0 && currentWidth + neededWidth > availableWidth) {
+        rows.push(currentRow);
+        currentRow = [];
+        currentWidth = 0;
+      }
+
+      // Add a space separator before the word (if not first on line)
+      if (currentRow.length > 0) {
+        currentRow.push({ char: ' ', mask: null, spaceWidth: fontSize * 0.4 });
+        currentWidth += spaceWidth;
+      }
+
+      for (const ch of word.chars) {
+        currentRow.push(ch);
+      }
+      currentWidth += word.width;
+    }
+    if (currentRow.length > 0) {
+      rows.push(currentRow);
+    }
+
+    return rows;
+  }
+
+  // --- Letter state ---
+  function createLetterState(char, mask, offsetX, offsetY) {
+    const settled = [];
+    for (let r = 0; r < mask.rows; r++) {
+      settled.push(new Array(mask.cols).fill(false));
+    }
+
+    return {
+      char,
+      offsetX,
+      offsetY,
+      mask,
+      settled,
+      falling: [],
+      complete: false,
+    };
+  }
+
+  function findTargetRow(letter, col) {
+    const { mask, settled } = letter;
+    let target = -1;
+    for (let r = mask.rows - 1; r >= 0; r--) {
+      if (mask.grid[r][col] && !settled[r][col]) {
+        target = r;
+        break;
+      }
+    }
+    return target;
+  }
+
+  function spawnDrop(letter) {
+    if (letter.complete) return;
+
+    const openCols = [];
+    for (let c = 0; c < letter.mask.cols; c++) {
+      if (findTargetRow(letter, c) >= 0) {
+        openCols.push(c);
+      }
+    }
+
+    if (openCols.length === 0) {
+      letter.complete = true;
+      return;
+    }
+
+    const col = openCols[Math.floor(Math.random() * openCols.length)];
+
+    letter.falling.push({
+      col,
+      row: -2,
+      targetRow: findTargetRow(letter, col),
+      speed: 0,
+    });
+  }
+
+  // --- Update physics ---
+  function updateLetters() {
+    const gravity = 0.4;
+
+    for (const letter of letters) {
+      for (let i = letter.falling.length - 1; i >= 0; i--) {
+        const drop = letter.falling[i];
+        drop.speed += gravity;
+        drop.row += drop.speed;
+
+        if (drop.row >= drop.targetRow) {
+          drop.row = drop.targetRow;
+          letter.settled[drop.targetRow][drop.col] = true;
+          letter.falling.splice(i, 1);
+        }
+      }
+    }
+  }
+
+  // --- Render ---
+  function render() {
+    if (letters.length === 0) {
+      canvas.width = 1;
+      canvas.height = 1;
+      ctx.clearRect(0, 0, 1, 1);
+      return;
+    }
+
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = totalCanvasWidth * dpr;
+    canvas.height = totalCanvasHeight * dpr;
+    canvas.style.width = totalCanvasWidth + 'px';
+    canvas.style.height = totalCanvasHeight + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    ctx.clearRect(0, 0, totalCanvasWidth, totalCanvasHeight);
+
+    ctx.font = `bold ${SMALL_FONT_SIZE}px 'Courier New', monospace`;
+    ctx.textBaseline = 'top';
+    ctx.textAlign = 'center';
+
+    for (const letter of letters) {
+      const ox = letter.offsetX;
+      const oy = letter.offsetY;
+      const { mask, settled, falling, char } = letter;
+
+      // 1. Draw faint ghost for all unfilled cells
+      for (let r = 0; r < mask.rows; r++) {
+        for (let c = 0; c < mask.cols; c++) {
+          if (mask.grid[r][c] && !settled[r][c]) {
+            ctx.fillStyle = 'rgba(255,255,255,0.03)';
+            ctx.fillText(char, ox + c * CELL_SIZE + CELL_SIZE / 2, oy + r * CELL_SIZE + 1);
+          }
+        }
+      }
+
+      // 2. Draw settled cells — border cells at full white, interior with gradient
+      for (let r = 0; r < mask.rows; r++) {
+        for (let c = 0; c < mask.cols; c++) {
+          if (!settled[r][c]) continue;
+          if (mask.border[r][c]) {
+            ctx.fillStyle = '#fff';
+          } else {
+            const brightness = 0.35 + 0.65 * (r / mask.rows);
+            ctx.fillStyle = `rgba(255,255,255,${brightness})`;
+          }
+          ctx.fillText(char, ox + c * CELL_SIZE + CELL_SIZE / 2, oy + r * CELL_SIZE + 1);
+        }
+      }
+
+      // 4. Draw falling characters
+      for (const drop of falling) {
+        ctx.fillStyle = 'rgba(255,255,255,0.85)';
+        ctx.fillText(char, ox + drop.col * CELL_SIZE + CELL_SIZE / 2, oy + drop.row * CELL_SIZE + 1);
+      }
+    }
+  }
+
+  // --- Main loop ---
+  let lastTime = 0;
+  let dropAccumulator = 0;
+
+  function loop(timestamp) {
+    const dt = lastTime ? (timestamp - lastTime) : 16;
+    lastTime = timestamp;
+
+    const speed = parseInt(speedSlider.value);
+    const dropInterval = DROP_INTERVAL_BASE / speed;
+
+    dropAccumulator += dt;
+    while (dropAccumulator >= dropInterval) {
+      dropAccumulator -= dropInterval;
+      for (const letter of letters) {
+        if (!letter.complete) {
+          spawnDrop(letter);
+        }
+      }
+    }
+
+    updateLetters();
+    render();
+
+    const anyActive = letters.some(l => !l.complete || l.falling.length > 0);
+    if (anyActive) {
+      animId = requestAnimationFrame(loop);
+    } else {
+      render();
+      animId = null;
+    }
+  }
+
+  function startAnimation() {
+    if (animId) cancelAnimationFrame(animId);
+    lastTime = 0;
+    dropAccumulator = 0;
+    animId = requestAnimationFrame(loop);
+  }
+
+  // --- Input handling ---
+  function onInputChange() {
+    const text = input.value.toUpperCase();
+    if (text.length === 0) {
+      letters = [];
+      render();
+      return;
+    }
+
+    const fontSize = computeFontSize(text);
+    const rows = computeLayout(text, fontSize);
+
+    // Build letter states with proper offsets
+    letters = [];
+    let y = 0;
+    totalCanvasWidth = 0;
+
+    for (const row of rows) {
+      let x = 0;
+      let rowHeight = 0;
+
+      // Center the row: compute row width first
+      let rowWidth = 0;
+      for (const item of row) {
+        if (item.char === ' ') {
+          rowWidth += item.spaceWidth + CHAR_GAP;
+        } else {
+          rowWidth += item.mask.pixelWidth + CHAR_GAP;
+        }
+      }
+      rowWidth -= CHAR_GAP;
+      totalCanvasWidth = Math.max(totalCanvasWidth, rowWidth);
+
+      // We'll center after we know totalCanvasWidth; for now use left-aligned x
+      for (const item of row) {
+        if (item.char === ' ') {
+          x += item.spaceWidth + CHAR_GAP;
+          continue;
+        }
+        const letter = createLetterState(item.char, item.mask, x, y);
+        letters.push(letter);
+        x += item.mask.pixelWidth + CHAR_GAP;
+        rowHeight = Math.max(rowHeight, item.mask.pixelHeight);
+      }
+
+      y += rowHeight + LINE_GAP;
+    }
+
+    totalCanvasHeight = Math.max(y - LINE_GAP, 1);
+    totalCanvasWidth = Math.max(totalCanvasWidth, 1);
+
+    // Center each row horizontally
+    for (const row of rows) {
+      let rowWidth = 0;
+      for (const item of row) {
+        if (item.char === ' ') {
+          rowWidth += item.spaceWidth + CHAR_GAP;
+        } else {
+          rowWidth += item.mask.pixelWidth + CHAR_GAP;
+        }
+      }
+      rowWidth -= CHAR_GAP;
+      const offsetAdj = Math.floor((totalCanvasWidth - rowWidth) / 2);
+
+      for (const letter of letters) {
+        // Find letters on this row by checking y
+        // (handled below with a different approach)
+      }
+    }
+
+    // Simpler centering: group letters by their offsetY, center each group
+    const byRow = new Map();
+    for (const letter of letters) {
+      if (!byRow.has(letter.offsetY)) byRow.set(letter.offsetY, []);
+      byRow.get(letter.offsetY).push(letter);
+    }
+    for (const [, rowLetters] of byRow) {
+      // Find rightmost edge of this row
+      let maxRight = 0;
+      for (const l of rowLetters) {
+        maxRight = Math.max(maxRight, l.offsetX + l.mask.pixelWidth);
+      }
+      const shift = Math.floor((totalCanvasWidth - maxRight) / 2);
+      for (const l of rowLetters) {
+        l.offsetX += shift;
+      }
+    }
+
+    startAnimation();
+  }
+
+  input.addEventListener('input', onInputChange);
+
+  // Re-layout on window resize
+  let resizeTimer;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      if (input.value.length > 0) onInputChange();
+    }, 200);
+  });
+
+  speedSlider.addEventListener('input', () => {
+    if (letters.length > 0 && !animId) {
+      startAnimation();
+    }
+  });
+
+  render();
+})();
+</script>
+</body>
+</html>
