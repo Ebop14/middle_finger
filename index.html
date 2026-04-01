@@ -58,7 +58,7 @@
     accent-color: #888;
   }
   #canvas-container {
-    padding: 30px 20px 60px;
+    padding: 10px 20px 10px;
     display: flex;
     justify-content: center;
   }
@@ -87,6 +87,19 @@
     line-height: 1;
   }
   #clear-btn:hover { color: #fff; border-color: #888; }
+  #copy-btn {
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    padding: 8px 14px;
+    background: #222;
+    border: 1px solid #444;
+    color: #ccc;
+    border-radius: 6px;
+    cursor: pointer;
+    margin-bottom: 20px;
+  }
+  #copy-btn:hover { background: #333; border-color: #666; }
+  #copy-btn.copied { color: #6f6; border-color: #6f6; }
 </style>
 </head>
 <body>
@@ -103,6 +116,7 @@
 <div id="canvas-container">
   <canvas id="canvas"></canvas>
 </div>
+<button id="copy-btn">Copy Image</button>
 
 <script>
 (() => {
@@ -113,6 +127,7 @@
   const uploadBtn = document.getElementById('upload-btn');
   const clearBtn = document.getElementById('clear-btn');
   const fileInput = document.getElementById('file-input');
+  const copyBtn = document.getElementById('copy-btn');
 
   // --- Configuration ---
   const CELL_SIZE = 10;
@@ -210,7 +225,7 @@
   function generateMaskFromImage(img) {
     const inputBar = document.getElementById('input-bar');
     const availableWidth = window.innerWidth - SIDE_PADDING * 2;
-    const availableHeight = window.innerHeight - inputBar.offsetHeight - 90;
+    const availableHeight = window.innerHeight - inputBar.offsetHeight - 120;
 
     // Grid dimensions from window cell capacity, preserving aspect ratio
     const maxCols = Math.floor(availableWidth / CELL_SIZE);
@@ -681,6 +696,20 @@
     }
   });
   clearBtn.addEventListener('click', clearImage);
+
+  copyBtn.addEventListener('click', () => {
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]).then(() => {
+        copyBtn.textContent = 'Copied!';
+        copyBtn.classList.add('copied');
+        setTimeout(() => {
+          copyBtn.textContent = 'Copy Image';
+          copyBtn.classList.remove('copied');
+        }, 1500);
+      });
+    });
+  });
 
   // Re-layout on window resize
   let resizeTimer;
