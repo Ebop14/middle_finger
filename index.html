@@ -65,6 +65,28 @@
   canvas {
     display: block;
   }
+  #upload-btn {
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    padding: 8px 14px;
+    background: #222;
+    border: 1px solid #444;
+    color: #ccc;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  #upload-btn:hover { background: #333; border-color: #666; }
+  #clear-btn {
+    font-size: 16px;
+    padding: 4px 10px;
+    background: none;
+    border: 1px solid #444;
+    color: #888;
+    border-radius: 6px;
+    cursor: pointer;
+    line-height: 1;
+  }
+  #clear-btn:hover { color: #fff; border-color: #888; }
 </style>
 </head>
 <body>
@@ -74,6 +96,9 @@
     <label>Speed</label>
     <input type="range" id="speed-slider" min="1" max="10" value="5" />
   </div>
+  <button id="upload-btn">Upload Image</button>
+  <button id="clear-btn" style="display:none">&#x2715;</button>
+  <input type="file" id="file-input" accept="image/*" style="display:none" />
 </div>
 <div id="canvas-container">
   <canvas id="canvas"></canvas>
@@ -85,6 +110,9 @@
   const ctx = canvas.getContext('2d');
   const input = document.getElementById('text-input');
   const speedSlider = document.getElementById('speed-slider');
+  const uploadBtn = document.getElementById('upload-btn');
+  const clearBtn = document.getElementById('clear-btn');
+  const fileInput = document.getElementById('file-input');
 
   // --- Configuration ---
   const CELL_SIZE = 10;
@@ -107,6 +135,9 @@
   let totalCanvasWidth = 0;
   let totalCanvasHeight = 0;
   let animId = null;
+  let imageMode = false;
+  let currentImage = null;
+  let currentImageMask = null;
 
   // --- Mask generation ---
   function generateMask(char, fontSize) {
@@ -162,6 +193,104 @@
             if (dr === 0 && dc === 0) continue;
             const nr = r + dr;
             const nc = c + dc;
+            if (nr < 0 || nr >= rows || nc < 0 || nc >= cols || !grid[nr][nc]) {
+              isBorder = true;
+            }
+          }
+        }
+        brow.push(isBorder);
+      }
+      border.push(brow);
+    }
+
+    return { grid, border, cols, rows, pixelWidth: cols * CELL_SIZE, pixelHeight: rows * CELL_SIZE };
+  }
+
+  // --- Mask generation from uploaded image ---
+  function generateMaskFromImage(img) {
+    const inputBar = document.getElementById('input-bar');
+    const availableWidth = window.innerWidth - SIDE_PADDING * 2;
+    const availableHeight = window.innerHeight - inputBar.offsetHeight - 90;
+
+    // Grid dimensions from window cell capacity, preserving aspect ratio
+    const maxCols = Math.floor(availableWidth / CELL_SIZE);
+    const maxRows = Math.floor(availableHeight / CELL_SIZE);
+    const imgAspect = img.width / img.height;
+    let cols, rows;
+    if (maxCols / maxRows > imgAspect) {
+      rows = maxRows;
+      cols = Math.floor(rows * imgAspect);
+    } else {
+      cols = maxCols;
+      rows = Math.floor(cols / imgAspect);
+    }
+
+    // Step 1: Trace edges at high resolution (4x grid) using Sobel
+    const S = 4;
+    const w = cols * S;
+    const h = rows * S;
+    const offscreen = document.createElement('canvas');
+    offscreen.width = w;
+    offscreen.height = h;
+    const octx = offscreen.getContext('2d');
+    octx.drawImage(img, 0, 0, w, h);
+
+    const imageData = octx.getImageData(0, 0, w, h);
+    const pixels = imageData.data;
+
+    // Grayscale
+    const gray = new Float32Array(w * h);
+    for (let i = 0; i < w * h; i++) {
+      const idx = i * 4;
+      gray[i] = pixels[idx] * 0.299 + pixels[idx + 1] * 0.587 + pixels[idx + 2] * 0.114;
+    }
+
+    // Sobel edge detection
+    const edges = new Float32Array(w * h);
+    let maxEdge = 0;
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const tl = gray[(y - 1) * w + x - 1], tc = gray[(y - 1) * w + x], tr = gray[(y - 1) * w + x + 1];
+        const ml = gray[y * w + x - 1],                                     mr = gray[y * w + x + 1];
+        const bl = gray[(y + 1) * w + x - 1], bc = gray[(y + 1) * w + x], br = gray[(y + 1) * w + x + 1];
+        const gx = -tl + tr - 2 * ml + 2 * mr - bl + br;
+        const gy = -tl - 2 * tc - tr + bl + 2 * bc + br;
+        const mag = Math.sqrt(gx * gx + gy * gy);
+        edges[y * w + x] = mag;
+        if (mag > maxEdge) maxEdge = mag;
+      }
+    }
+
+    // Step 2: Scale edges down to grid — max-pool each cell block
+    const threshold = maxEdge * 0.15;
+    const grid = [];
+    for (let r = 0; r < rows; r++) {
+      const row = [];
+      for (let c = 0; c < cols; c++) {
+        let hasEdge = false;
+        for (let dy = 0; dy < S && !hasEdge; dy++) {
+          for (let dx = 0; dx < S && !hasEdge; dx++) {
+            if (edges[(r * S + dy) * w + c * S + dx] > threshold) {
+              hasEdge = true;
+            }
+          }
+        }
+        row.push(hasEdge);
+      }
+      grid.push(row);
+    }
+
+    // Border detection (for render brightness)
+    const border = [];
+    for (let r = 0; r < rows; r++) {
+      const brow = [];
+      for (let c = 0; c < cols; c++) {
+        if (!grid[r][c]) { brow.push(false); continue; }
+        let isBorder = false;
+        for (let dr = -1; dr <= 1 && !isBorder; dr++) {
+          for (let dc = -1; dc <= 1 && !isBorder; dc++) {
+            if (dr === 0 && dc === 0) continue;
+            const nr = r + dr, nc = c + dc;
             if (nr < 0 || nr >= rows || nc < 0 || nc >= cols || !grid[nr][nc]) {
               isBorder = true;
             }
@@ -326,13 +455,17 @@
       const ox = letter.offsetX;
       const oy = letter.offsetY;
       const { mask, settled, falling, char } = letter;
+      const ft = letter.fillText;
+      const getChar = ft
+        ? (r, c) => ft[(r * mask.cols + c) % ft.length]
+        : () => char;
 
       // 1. Draw faint ghost for all unfilled cells
       for (let r = 0; r < mask.rows; r++) {
         for (let c = 0; c < mask.cols; c++) {
           if (mask.grid[r][c] && !settled[r][c]) {
             ctx.fillStyle = 'rgba(255,255,255,0.03)';
-            ctx.fillText(char, ox + c * CELL_SIZE + CELL_SIZE / 2, oy + r * CELL_SIZE + 1);
+            ctx.fillText(getChar(r, c), ox + c * CELL_SIZE + CELL_SIZE / 2, oy + r * CELL_SIZE + 1);
           }
         }
       }
@@ -347,14 +480,14 @@
             const brightness = 0.35 + 0.65 * (r / mask.rows);
             ctx.fillStyle = `rgba(255,255,255,${brightness})`;
           }
-          ctx.fillText(char, ox + c * CELL_SIZE + CELL_SIZE / 2, oy + r * CELL_SIZE + 1);
+          ctx.fillText(getChar(r, c), ox + c * CELL_SIZE + CELL_SIZE / 2, oy + r * CELL_SIZE + 1);
         }
       }
 
       // 4. Draw falling characters
       for (const drop of falling) {
         ctx.fillStyle = 'rgba(255,255,255,0.85)';
-        ctx.fillText(char, ox + drop.col * CELL_SIZE + CELL_SIZE / 2, oy + drop.row * CELL_SIZE + 1);
+        ctx.fillText(getChar(drop.targetRow, drop.col), ox + drop.col * CELL_SIZE + CELL_SIZE / 2, oy + drop.row * CELL_SIZE + 1);
       }
     }
   }
@@ -375,7 +508,10 @@
       dropAccumulator -= dropInterval;
       for (const letter of letters) {
         if (!letter.complete) {
-          spawnDrop(letter);
+          const count = letter.fillText ? Math.ceil(letter.mask.cols / 10) : 1;
+          for (let i = 0; i < count; i++) {
+            spawnDrop(letter);
+          }
         }
       }
     }
@@ -399,8 +535,54 @@
     animId = requestAnimationFrame(loop);
   }
 
+  // --- Image upload handling ---
+  function onImageUpload(file) {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      imageMode = true;
+      currentImage = img;
+      currentImageMask = generateMaskFromImage(img);
+
+      const fillText = input.value.replace(/\s/g, '') || '#';
+
+      letters = [createLetterState('#', currentImageMask, 0, 0)];
+      letters[0].fillText = fillText;
+
+      totalCanvasWidth = currentImageMask.pixelWidth;
+      totalCanvasHeight = currentImageMask.pixelHeight;
+
+      input.placeholder = 'Type fill characters...';
+      clearBtn.style.display = 'inline-block';
+
+      startAnimation();
+    };
+    img.src = url;
+  }
+
+  function clearImage() {
+    imageMode = false;
+    currentImage = null;
+    currentImageMask = null;
+    input.placeholder = 'Type ASCII text...';
+    clearBtn.style.display = 'none';
+    fileInput.value = '';
+    onInputChange();
+  }
+
   // --- Input handling ---
   function onInputChange() {
+    if (imageMode && currentImageMask) {
+      const fillText = input.value.replace(/\s/g, '') || '#';
+      letters = [createLetterState('#', currentImageMask, 0, 0)];
+      letters[0].fillText = fillText;
+      totalCanvasWidth = currentImageMask.pixelWidth;
+      totalCanvasHeight = currentImageMask.pixelHeight;
+      startAnimation();
+      return;
+    }
+
     const text = input.value.toUpperCase();
     if (text.length === 0) {
       letters = [];
@@ -492,12 +674,25 @@
 
   input.addEventListener('input', onInputChange);
 
+  uploadBtn.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', (e) => {
+    if (e.target.files && e.target.files[0]) {
+      onImageUpload(e.target.files[0]);
+    }
+  });
+  clearBtn.addEventListener('click', clearImage);
+
   // Re-layout on window resize
   let resizeTimer;
   window.addEventListener('resize', () => {
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
-      if (input.value.length > 0) onInputChange();
+      if (imageMode && currentImage) {
+        currentImageMask = generateMaskFromImage(currentImage);
+        onInputChange();
+      } else if (input.value.length > 0) {
+        onInputChange();
+      }
     }, 200);
   });
 
